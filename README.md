@@ -29,7 +29,7 @@ This integration interfaces with the shunt over Bluetooth Low Energy (BLE). It w
 
 1. Open **HACS** in your Home Assistant UI.
 2. Click the top-right three dots (**⋮**) and select **Custom repositories**.
-3. Enter your repository URL (e.g., `https://github.com/your-username/ha-tbd-smartshunt`).
+3. Enter your repository URL: `https://github.com/mrbrito/ha-tbd-smartshunt`.
 4. Select **Integration** as the category and click **Add**.
 5. Find **TBD Smartshunt** in the HACS store and click **Download**.
 6. Restart Home Assistant.

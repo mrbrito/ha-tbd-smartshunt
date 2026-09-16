@@ -2,10 +2,10 @@
   "domain": "tbd_smartshunt",
   "name": "TBD Smartshunt",
   "codeowners": [
-    "@luis"
+    "@mrbrito"
   ],
   "config_flow": true,
-  "documentation": "https://github.com/luis/ha-tbd-smartshunt",
+  "documentation": "https://github.com/mrbrito/ha-tbd-smartshunt",
   "integration_type": "device",
   "iot_class": "local_polling",
   "bluetooth": [
