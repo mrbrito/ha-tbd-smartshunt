@@ -1,0 +1,26 @@
+{
+  "domain": "tbd_smartshunt",
+  "name": "TBD Smartshunt",
+  "codeowners": [
+    "@luis"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/luis/ha-tbd-smartshunt",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "bluetooth": [
+    {
+      "local_name": "TBDsmartshunt*"
+    },
+    {
+      "service_uuid": "18424398-7cbc-11e9-8f9e-2a86e4085a59"
+    }
+  ],
+  "dependencies": [
+    "bluetooth"
+  ],
+  "requirements": [
+    "bleak-retry-connector>=3.0.0"
+  ],
+  "version": "1.0.0"
+}

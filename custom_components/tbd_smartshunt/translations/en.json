@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to TBD Smartshunt",
+        "description": "Select your discovered TBD Smartshunt device or enter its Bluetooth MAC address.",
+        "data": {
+          "address": "Bluetooth Device",
+          "name": "Device Name",
+          "poll_interval": "Update Interval (seconds)"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "Discovered TBD Smartshunt",
+        "description": "Do you want to set up {name}?"
+      }
+    },
+    "abort": {
+      "already_configured": "This TBD Smartshunt is already configured."
+    }
+  }
+}
