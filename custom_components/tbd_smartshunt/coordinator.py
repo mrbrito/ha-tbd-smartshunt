@@ -27,7 +27,9 @@ class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
                          update_interval=timedelta(seconds=poll_interval))
         self.address = address
         self.device_name = name
-        self._reader = hass.data.setdefault(DOMAIN, {}).setdefault("_pairing_readers", {}).setdefault(address, PairingReader())
+        self._reader: PairingReader = hass.data.setdefault(DOMAIN, {}).setdefault("_pairing_readers", {}).setdefault(address, PairingReader())
+        # Clear any leftover cooldown on reload/init so testing is never blocked
+        self._reader.reset_cooldown(address)
 
     async def async_read_data(self) -> ShuntData:
         """Also used by config flow to validate before creating an entry."""
@@ -36,10 +38,18 @@ class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
             raise UpdateFailed(f"{self.address} is not visible to a connectable Bluetooth adapter/proxy")
         client = None
         try:
-            async with asyncio.timeout(45):
-                client = await establish_connection(
-                    BleakClientWithServiceCache, device, self.device_name, max_attempts=2,
-                )
+            _LOGGER.warning("[%s] Connecting to TBD Smartshunt...", self.address)
+            try:
+                async with asyncio.timeout(45):
+                    client = await establish_connection(
+                        BleakClientWithServiceCache, device, self.device_name, max_attempts=2, pair=True,
+                    )
+            except TypeError:
+                # In case older bleak_retry_connector without pair argument is installed
+                async with asyncio.timeout(45):
+                    client = await establish_connection(
+                        BleakClientWithServiceCache, device, self.device_name, max_attempts=2,
+                    )
             service = client.services.get_service(SERVICE_UUID)
             if service is None or not any(c.uuid.lower() == CHAR_STATE_OF_CHARGE for c in service.characteristics):
                 raise UpdateFailed("Device does not expose the expected TBD telemetry characteristic")
@@ -47,10 +57,21 @@ class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
             data = parse_state_of_charge(raw)
             if data is None:
                 raise UpdateFailed(f"Invalid telemetry from {self.address}: expected valid 44-byte packet, received {len(raw)} bytes")
+            _LOGGER.warning(
+                "[%s] Telemetry read successful! SoC=%d%%, Voltage=%.2fV, Current=%.2fA, Power=%.2fW",
+                self.address, data.soc, data.voltage, data.current, data.power,
+            )
             return data
         except (PairingFailed, UpdateFailed):
             raise
         except (BleakError, TimeoutError) as err:
+            err_msg = str(err)
+            if "Pairing is not available" in err_msg:
+                raise UpdateFailed(
+                    f"{self.address}: Bluetooth proxy does not support BLE pairing. "
+                    f"The TBD Smartshunt requires an encrypted link. "
+                    f"Please use a local Bluetooth adapter or an ESPHome proxy with pairing enabled (ESPHome 2024.6+)."
+                ) from err
             raise UpdateFailed(f"Bluetooth communication failed for {self.address}: {err}") from err
         finally:
             if client is not None:
@@ -58,10 +79,10 @@ class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
                     async with asyncio.timeout(10):
                         await client.disconnect()
                 except Exception as err:
-                    _LOGGER.debug("Disconnect cleanup for %s: %s", self.address, err)
+                    _LOGGER.debug("[%s] Disconnect cleanup: %s", self.address, err)
 
     async def _async_update_data(self) -> ShuntData:
         try:
             return await self.async_read_data()
         except PairingFailed as err:
-            raise UpdateFailed(f"{self.address}: {err}. Pairing must use the connecting adapter; phone or host pairing does not bond a proxy.") from err
+            raise UpdateFailed(f"{self.address}: {err}") from err

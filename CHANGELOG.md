@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.4
+
+- Pass `pair=True` in `establish_connection` to initiate link encryption on connect.
+- Add 1.5s encryption stabilization delay and 3-attempt read retry loop after pairing.
+- Purge stale bonds via `client.unpair()` if reads fail with Insufficient Authentication despite pairing.
+- Clear pairing cooldown automatically on integration reload/init, and shorten cooldown to 10s.
+- Promote key diagnostic logs to `WARNING` so all pairing/read steps appear in Home Assistant's System Log UI.
+
 ## 1.0.3
 
 - Reduce pairing failure cooldown from 5 minutes (300s) to 15 seconds for testing.
