@@ -11,7 +11,7 @@ from .const import CHAR_STATE_OF_CHARGE
 _LOGGER = logging.getLogger(__name__)
 PAIR_TIMEOUT = 30
 READ_TIMEOUT = 20
-PAIR_COOLDOWN = 300
+PAIR_COOLDOWN = 15
 
 
 class PairingFailed(Exception):
@@ -59,8 +59,9 @@ class PairingReader:
         except Exception as err:
             if not authentication_required(err):
                 raise
-        if time.monotonic() < self._next_pair.get(peer, 0):
-            raise PairingFailed("Authentication still required; automatic pairing is cooling down for up to five minutes")
+        remaining = int(self._next_pair.get(peer, 0) - time.monotonic())
+        if remaining > 0:
+            raise PairingFailed(f"Authentication still required; automatic pairing is cooling down ({remaining}s remaining)")
         self._next_pair[peer] = time.monotonic() + PAIR_COOLDOWN
         _LOGGER.info("Authentication required for %s; attempting pairing through connected adapter", peer)
         try:

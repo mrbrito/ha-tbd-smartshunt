@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.3
+
+- Reduce pairing failure cooldown from 5 minutes (300s) to 15 seconds for testing.
+- Include exact countdown seconds in the cooldown log message.
+
 ## 1.0.2
 
 - Fix invalid syntax in pairing handler.
