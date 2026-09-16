@@ -17,7 +17,6 @@ from homeassistant.const import (
     UnitOfElectricPotential,
     UnitOfElectricCurrent,
     UnitOfPower,
-    UnitOfTime,
     CONF_NAME,
 )
 from homeassistant.core import HomeAssistant
@@ -39,7 +38,7 @@ class TbdShuntSensorEntityDescription(SensorEntityDescription):
 SENSOR_TYPES: tuple[TbdShuntSensorEntityDescription, ...] = (
     TbdShuntSensorEntityDescription(
         key="soc",
-        name="State of Charge",
+        name="Reported State of Charge",
         device_class=SensorDeviceClass.BATTERY,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
@@ -72,33 +71,7 @@ SENSOR_TYPES: tuple[TbdShuntSensorEntityDescription, ...] = (
         suggested_display_precision=1,
         value_fn=lambda data: data.power,
     ),
-    TbdShuntSensorEntityDescription(
-        key="consumed_ah",
-        name="Consumed Capacity",
-        icon="mdi:battery-arrow-down",
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement="Ah",
-        suggested_display_precision=2,
-        value_fn=lambda data: data.consumed_ah,
-    ),
-    TbdShuntSensorEntityDescription(
-        key="time_remaining",
-        name="Time Remaining",
-        icon="mdi:timer-sand",
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        value_fn=lambda data: data.time_remaining_minutes,
-    ),
-    TbdShuntSensorEntityDescription(
-        key="uptime",
-        name="Uptime",
-        icon="mdi:clock-outline",
-        device_class=SensorDeviceClass.DURATION,
-        native_unit_of_measurement=UnitOfTime.SECONDS,
-        entity_registry_enabled_default=False,
-        value_fn=lambda data: data.uptime_seconds,
-    ),
+
 )
 
 
@@ -141,7 +114,6 @@ class TbdShuntSensor(CoordinatorEntity[TbdSmartshuntCoordinator], SensorEntity):
             name=device_name,
             manufacturer="DaYan Co.LTD",
             model="DA1",
-            sw_version="v00.00.03",
         )
 
     @property

@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to TBD Smartshunt",
-        "description": "Select your discovered TBD Smartshunt device or enter its Bluetooth MAC address.",
+        "description": "Enter the Bluetooth address of your TBD Smartshunt. Keep phone apps disconnected. Setup tests a read and attempts Bluetooth pairing if required.",
         "data": {
           "address": "Bluetooth Device",
           "name": "Device Name",
@@ -12,11 +12,18 @@
       },
       "bluetooth_confirm": {
         "title": "Discovered TBD Smartshunt",
-        "description": "Do you want to set up {name}?"
+        "description": "Connect to {name}? Setup will read telemetry and attempt pairing through the selected Bluetooth adapter if required."
       }
     },
     "abort": {
-      "already_configured": "This TBD Smartshunt is already configured."
+      "already_configured": "This TBD Smartshunt is already configured.",
+      "not_supported": "This advertisement does not identify a TBD Smartshunt."
+    },
+    "error": {
+      "cannot_connect": "Unable to read the shunt. Check range, disconnect phone apps, and check the Home Assistant log.",
+      "pairing_failed": "Automatic pairing or the authenticated read failed. Disconnect phone apps and check whether a passkey is required. See the Home Assistant log.",
+      "pairing_unsupported": "The selected adapter does not support pairing. Check ESPHome firmware and pairing support.",
+      "invalid_address": "Enter a Bluetooth address in AA:BB:CC:DD:EE:FF format."
     }
   }
 }

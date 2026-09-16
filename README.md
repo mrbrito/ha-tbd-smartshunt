@@ -1,84 +1,92 @@
-# TBD Smartshunt Home Assistant Integration
+# TBD Smartshunt for Home Assistant
 
-Custom Home Assistant integration for the **TBD Smartshunt** (also known as DaYan DA1 / FE-Shunt 500A Battery Monitor).
+Experimental local Bluetooth integration for TBD Smartshunt / DaYan DA1 devices.
+Version 1.0.2 fixes the broken pairing handler and validates telemetry before setup.
 
-This integration interfaces with the shunt over Bluetooth Low Energy (BLE). It works with both **local Bluetooth adapters** and **ESPHome Bluetooth Proxies**, allowing you to monitor your battery bank anywhere in your home or RV.
+## Sensors and evidence
 
----
+Voltage, current, power and **Reported State of Charge** are exposed per shunt.
+Two devices and three captured packets support the voltage/current/power layout.
+Positive current was observed while charging with no load in the tested wiring.
+Discharge encoding still requires a real capture. SOC is reported by the shunt:
+it can say 100% on a depleted battery. This integration does not correct or
+recalibrate it. Do not use that reported estimate as battery protection.
 
-## Features
+Previous versions labeled unknown fields as consumed Ah, remaining minutes,
+uptime and auxiliary voltage. Those meanings have not been validated, so these
+sensors are no longer created. Existing registry entries may remain unavailable;
+they can be removed from the device page. Raw trailing bytes stay in the parser
+for further protocol research. Firmware version is no longer hard-coded.
 
-- **Multi-device support**: Connect to multiple shunts simultaneously (e.g. House Battery and Auxiliary/Starter Battery).
-- **Auto-Discovery**: Automatically discovers nearby `TBDsmartshunt-*` devices via Bluetooth advertisements or ESPHome proxies.
-- **Rich Telemetry Entities**:
-  - **State of Charge (SoC)** (`%`)
-  - **Battery Voltage** (`V`)
-  - **Battery Current** (`A`, positive for charging, negative for discharging)
-  - **Instantaneous Power** (`W`)
-  - **Consumed Capacity** (`Ah`)
-  - **Time Remaining** (`min`, indicates "Infinite" when charging)
-  - **Uptime** (`s`, diagnostic)
-- **ESPHome Bluetooth Proxy Friendly**: Connects cleanly, reads GATT telemetry, and disconnects so connection handles remain free for the mobile app or other devices.
-- **Configurable Polling**: Adjust poll frequency (default 15s, range 5s–300s) directly in the setup flow.
+## Install
 
----
+In HACS add `https://github.com/mrbrito/ha-tbd-smartshunt` as a custom repository
+of type Integration, download, then restart Home Assistant. Alternatively copy
+`custom_components/tbd_smartshunt` into your HA configuration's `custom_components`
+directory and restart. Local changes are not on GitHub until explicitly published.
 
-## Installation
+## Setup and pairing
 
-### Method 1: HACS (Recommended)
+1. Power the shunt and place a connectable Bluetooth adapter/proxy nearby.
+2. Disconnect the vendor app and nRF Connect; they may occupy the device's connection.
+3. Confirm the discovered TBD device, or add TBD Smartshunt and enter its MAC.
+4. Setup connects and reads telemetry. If ATT reports insufficient authentication
+   or encryption, it attempts `client.pair()` on that same connection and reads again.
+5. An entry is created only after a valid telemetry packet is read. Repeat for
+   each shunt. Separate Bluetooth addresses identify the devices.
 
-1. Open **HACS** in your Home Assistant UI.
-2. Click the top-right three dots (**⋮**) and select **Custom repositories**.
-3. Enter your repository URL: `https://github.com/mrbrito/ha-tbd-smartshunt`.
-4. Select **Integration** as the category and click **Add**.
-5. Find **TBD Smartshunt** in the HACS store and click **Download**.
-6. Restart Home Assistant.
+The normal path reads without pairing when the link is already authorized.
+Each transaction attempts pairing at most once (30-second timeout) and retries
+its read once. Failed pairing has a five-minute cooldown per shunt in the running
+HA process, including setup retries. Reloading the integration retains that
+cooldown; restarting HA clears it. A bonded link can reconnect without user input
+when the adapter and device retain their bond. Polling releases the connection
+slot after each read (default 15 seconds; configurable during manual setup).
 
-### Method 2: Manual Installation
+ESPHome proxies must support active GATT connections and pairing. The backend
+checks the firmware's PAIRING capability. Pairing is between the shunt and the
+actual adapter/proxy: pairing your phone or running `bluetoothctl` against a
+host adapter does not bond an ESPHome proxy. Another proxy may need its own
+bond. The shunt's bond capacity and behavior across multiple proxies are untested.
 
-1. Copy the `custom_components/tbd_smartshunt` directory to your Home Assistant configuration directory:
-   ```
-   <config_dir>/custom_components/tbd_smartshunt/
-   ```
-2. Restart Home Assistant.
+If a passkey or confirmation is required, fully unattended pairing may fail.
+This release does not implement a passkey agent and never guesses or writes the
+custom PIN characteristic. It does not unpair devices or erase stored bonds.
+Close phone connections, check range and firmware, then check HA logs for the
+specific pairing/read failure. An unsupported adapter gets a distinct setup error.
 
----
+Discovery matches TBD device names; a generic SDK service UUID alone is not
+sufficient. Manual entry remains available for renamed devices. The expected
+service and characteristic must exist before any telemetry read or pairing.
 
-## Configuration
+## Protocol (provisional)
 
-1. Once Home Assistant restarts, if a TBD Smartshunt is powered on and within range of your Bluetooth adapter or ESPHome Bluetooth Proxy, Home Assistant will display a notification:
-   > **Discovered: TBDsmartshunt-XXXXXX**
-2. Click **Configure** and follow the prompts.
-3. If not discovered automatically:
-   - Go to **Settings** → **Devices & Services** → **Add Integration**.
-   - Search for **TBD Smartshunt**.
-   - Select your device from the discovered dropdown or enter its MAC address manually.
+Service: `18424398-7cbc-11e9-8f9e-2a86e4085a59`
 
----
+Telemetry: `2d86686a-53dc-25b3-0c4a-f0e10c8dee20`
 
-## Technical Protocol Specifications
+| Offset | Interpretation | Status |
+| --- | --- | --- |
+| 0..3 | Little-endian uint32 reported SOC | Only 100% captured; width/scaling need more samples |
+| 4..7 | Little-endian float32 voltage | Supported by captures |
+| 8..11 | Little-endian float32 current | Supported; discharge sign unverified |
+| 12..15 | Little-endian float32 power | Supported by captures |
+| 16..43 | Unknown fields | Preserved without physical units |
 
-### BLE GATT Architecture
+Exactly 44 bytes are accepted. Nonfinite measurements, SOC outside 0..100 and
+negative voltage are rejected. Precision is retained internally; display rounding
+is handled by sensor descriptions. This is a read-only measurement integration
+apart from Bluetooth pairing; no configuration/calibration characteristic writes.
 
-- **Primary Service UUID**: `18424398-7cbc-11e9-8f9e-2a86e4085a59`
-- **State of Charge Characteristic UUID**: `2d86686a-53dc-25b3-0c4a-f0e10c8dee20` (Properties: `NOTIFY`, `READ`, `WRITE`)
+## Development and validation
 
-### 44-Byte Binary Payload Mapping
+Run `python -B -m unittest discover -s tests -v`. Tests cover captured packets,
+malformed values and the read/pair/read transaction. Mock pairing tests do not
+prove hardware compatibility. See CHANGELOG.md for changes and live-test results.
 
-| Offset | Format | Unit | Description |
-| :--- | :--- | :--- | :--- |
-| `0 - 3` | `uint32` | `%` | State of Charge |
-| `4 - 7` | `float32` (LE) | `V` | Battery Voltage |
-| `8 - 11` | `float32` (LE) | `A` | Battery Current |
-| `12 - 15` | `float32` (LE) | `W` | Power |
-| `16 - 19` | `float32` (LE) | `V` | Auxiliary Voltage / Starter Battery |
-| `20 - 23` | `uint32` | `min` | Time remaining (`0xFFFFFFFF` = Infinite / Charging) |
-| `24 - 27` | `uint32` | `s` | Uptime counter |
-| `28 - 31` | `float32` (LE) | `Ah` | Consumed capacity |
-| `32 - 43` | `bytes[12]` | — | Padding / Reserved |
+References:
+- https://developers.home-assistant.io/docs/bluetooth/
+- https://esphome.io/components/bluetooth_proxy/
+- https://github.com/Bluetooth-Devices/bleak-esphome
 
----
-
-## License
-
-MIT License. Feel free to use, modify, and distribute.
+MIT license.

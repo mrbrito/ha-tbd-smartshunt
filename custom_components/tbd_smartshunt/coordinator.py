@@ -1,97 +1,67 @@
-"""DataUpdateCoordinator for the TBD Smartshunt integration."""
-
+"""Polling through Home Assistant's shared Bluetooth adapters and proxies."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 
+from bleak import BleakError
+from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
+from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.components import bluetooth
-from bleak_retry_connector import establish_connection, BleakClientWithServiceCache
-from bleak import BleakError
 
-from .const import DOMAIN, CHAR_STATE_OF_CHARGE, DEFAULT_POLL_INTERVAL
+from .const import DOMAIN, CHAR_STATE_OF_CHARGE, DEFAULT_POLL_INTERVAL, SERVICE_UUID
 from .parser import ShuntData, parse_state_of_charge
+from .transport import PairingFailed, PairingReader
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
-    """Coordinator to manage fetching data from TBD Smartshunt via Bluetooth."""
+    """Read one shunt without monopolizing a proxy connection slot."""
 
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        address: str,
-        name: str,
-        poll_interval: int = DEFAULT_POLL_INTERVAL,
-    ) -> None:
-        """Initialize the coordinator."""
-        super().__init__(
-            hass,
-            _LOGGER,
-            name=f"{name} ({address})",
-            update_interval=timedelta(seconds=poll_interval),
-        )
+    def __init__(self, hass: HomeAssistant, address: str, name: str,
+                 poll_interval: int = DEFAULT_POLL_INTERVAL) -> None:
+        super().__init__(hass, _LOGGER, name=f"{name} ({address})",
+                         update_interval=timedelta(seconds=poll_interval))
         self.address = address
         self.device_name = name
+        self._reader = hass.data.setdefault(DOMAIN, {}).setdefault("_pairing_readers", {}).setdefault(address, PairingReader())
+
+    async def async_read_data(self) -> ShuntData:
+        """Also used by config flow to validate before creating an entry."""
+        device = bluetooth.async_ble_device_from_address(self.hass, self.address, connectable=True)
+        if device is None:
+            raise UpdateFailed(f"{self.address} is not visible to a connectable Bluetooth adapter/proxy")
+        client = None
+        try:
+            async with asyncio.timeout(45):
+                client = await establish_connection(
+                    BleakClientWithServiceCache, device, self.device_name, max_attempts=2,
+                )
+            service = client.services.get_service(SERVICE_UUID)
+            if service is None or not any(c.uuid.lower() == CHAR_STATE_OF_CHARGE for c in service.characteristics):
+                raise UpdateFailed("Device does not expose the expected TBD telemetry characteristic")
+            raw = await self._reader.read(client, self.address)
+            data = parse_state_of_charge(raw)
+            if data is None:
+                raise UpdateFailed(f"Invalid telemetry from {self.address}: expected valid 44-byte packet, received {len(raw)} bytes")
+            return data
+        except (PairingFailed, UpdateFailed):
+            raise
+        except (BleakError, TimeoutError) as err:
+            raise UpdateFailed(f"Bluetooth communication failed for {self.address}: {err}") from err
+        finally:
+            if client is not None:
+                try:
+                    async with asyncio.timeout(10):
+                        await client.disconnect()
+                except Exception as err:
+                    _LOGGER.debug("Disconnect cleanup for %s: %s", self.address, err)
 
     async def _async_update_data(self) -> ShuntData:
-        """Connect to the shunt, read the telemetry characteristic, and return parsed data."""
-        ble_device = bluetooth.async_ble_device_from_address(
-            self.hass, self.address, connectable=True
-        )
-        if not ble_device:
-            raise UpdateFailed(
-                f"TBD Smartshunt at {self.address} not found via local adapters or ESPHome Bluetooth proxies"
-            )
-
         try:
-            client = await establish_connection(
-                BleakClientWithServiceCache,
-                ble_device,
-                self.device_name,
-                max_attempts=3,
-            )
-            try:
-                try:
-                    raw_bytes = await client.read_gatt_char(CHAR_STATE_OF_CHARGE)
-                except Exception as read_err:
-                    err_msg = str(read_err).lower()
-                    if "insufficient authentication" in err_msg or "error: 5" in err_msg or "error 5" in err_msg:
-                        _LOGGER.warning(
-                            "TBD Smartshunt at %s requires BLE bonding/pairing. Attempting automatic pairing...",
-                            self.address,
-                        )
-                        if hasattr(client, "pair"):
-                            await client.pair()
-                            _LOGGER.info("Pairing succeeded with %s. Reading telemetry...", self.address)
-                            raw_bytes = await client.read_gatt_char(CHAR_STATE_OF_CHARGE)
-                        else:
-                            raise BleakError("Client has no pair method")
-                    except Exception as pair_err:
-                        _LOGGER.error("Pairing attempt failed for %s: %s", self.address, pair_err)
-                        raise UpdateFailed(
-                            f"Pairing required for {self.address} but automatic pairing failed ({pair_err}). "
-                            f"Please run 'bluetoothctl pair {self.address}' and 'trust {self.address}' in your Home Assistant terminal."
-                        ) from pair_err
-                    else:
-                        raise
-
-                data = parse_state_of_charge(raw_bytes)
-                if not data:
-                    raise UpdateFailed(
-                        f"Received invalid or truncated payload from {self.address}"
-                    )
-                return data
-            finally:
-                await client.disconnect()
-        except BleakError as err:
-            raise UpdateFailed(
-                f"Bluetooth communication failure with {self.address}: {err}"
-            ) from err
-        except Exception as err:
-            raise UpdateFailed(
-                f"Unexpected error communicating with {self.address}: {err}"
-            ) from err
+            return await self.async_read_data()
+        except PairingFailed as err:
+            raise UpdateFailed(f"{self.address}: {err}. Pairing must use the connecting adapter; phone or host pairing does not bond a proxy.") from err

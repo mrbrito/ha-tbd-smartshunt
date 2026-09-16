@@ -1,75 +1,40 @@
-"""Unit tests for the TBD Smartshunt telemetry parser."""
-
-import unittest
-import sys
-import os
+import math
 import struct
-import importlib.util
+import unittest
+from loader import load
 
-# Load parser directly without triggering __init__.py homeassistant dependencies
-parser_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "custom_components", "tbd_smartshunt", "parser.py")
-)
-module_name = "custom_components.tbd_smartshunt.parser"
-spec = importlib.util.spec_from_file_location(module_name, parser_path)
-tbd_parser = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = tbd_parser
-spec.loader.exec_module(tbd_parser)
+parse = load('parser').parse_state_of_charge
 
-parse_state_of_charge = tbd_parser.parse_state_of_charge
+class ParserTests(unittest.TestCase):
+    def test_three_captured_packets(self):
+        captures = [
+            ('64000000c8755141552bba40cf1d964200000000ffffffff9f2a0000ab40a43c000000000000000000000000',13.091255,5.817790,75.058220),
+            ('6400000006ea3041ec2c674037c21f4200000000ffffffff70b50200731f593b000048c20000000000000000',11.057135,3.612117,39.939663),
+            ('6400000035173041ab8f6740c3471f4200000000ffffffff15b5020073d66e3b000048c20000000000000000',11.005666,3.618144,39.820080),
+        ]
+        for hex_data,v,a,w in captures:
+            raw = bytes.fromhex(hex_data)
+            data = parse(raw)
+            self.assertEqual(data.soc,100)
+            for actual,expected in [(data.voltage,v),(data.current,a),(data.power,w)]:
+                self.assertAlmostEqual(actual,expected,places=5)
+            self.assertEqual(data.raw_tail,raw[16:])
 
+    def test_unsupported_lengths(self):
+        for length in (0,16,31,32,43,45,88):
+            self.assertIsNone(parse(bytes(length)))
 
-class TestTbdShuntParser(unittest.TestCase):
-    """Test suite for parsing TBD Smartshunt telemetry payloads."""
+    def test_nonfinite_values(self):
+        for index in (1,2,3):
+            for value in (math.nan,math.inf,-math.inf):
+                fields=[100,12.0,3.0,36.0];fields[index]=value
+                self.assertIsNone(parse(struct.pack('<Ifff',*fields)+bytes(28)))
 
-    def test_parse_screenshot_payload(self):
-        """Test parsing the exact 44-byte payload from Screenshot 163844."""
-        hex_data = (
-            "64-00-00-00-C8-75-51-41-55-2B-BA-40-CF-1D-96-42-"
-            "00-00-00-00-FF-FF-FF-FF-9F-2A-00-00-AB-40-A4-3C-"
-            "00-00-00-00-00-00-00-00-00-00-00-00"
-        )
-        raw_bytes = bytes.fromhex(hex_data.replace("-", ""))
+    def test_invalid_soc_voltage(self):
+        self.assertIsNone(parse(struct.pack('<Ifff',101,12,1,12)+bytes(28)))
+        self.assertIsNone(parse(struct.pack('<Ifff',50,-1,1,1)+bytes(28)))
 
-        data = parse_state_of_charge(raw_bytes)
-        self.assertIsNotNone(data)
-        self.assertEqual(data.soc, 100)
-        self.assertAlmostEqual(data.voltage, 13.09, places=2)
-        self.assertAlmostEqual(data.current, 5.82, places=2)
-        self.assertAlmostEqual(data.power, 75.06, places=2)
-        self.assertAlmostEqual(data.consumed_ah, 0.02, places=2)
-        self.assertIsNone(data.time_remaining_minutes)  # 0xFFFFFFFF = Infinite
-        self.assertEqual(data.uptime_seconds, 10911)
-
-    def test_short_payload_returns_none(self):
-        """Test that truncated or malformed payloads safely return None."""
-        self.assertIsNone(parse_state_of_charge(b""))
-        self.assertIsNone(parse_state_of_charge(b"\x00" * 16))
-
-    def test_discharging_payload(self):
-        """Test parsing when battery is discharging with finite time remaining."""
-        # Format: SoC(I), Voltage(f), Current(f), Power(f), Aux(f), TimeRem(I), Uptime(I), ConsumedAh(f)
-        payload = struct.pack(
-            "<IffffIIf",
-            85,        # SoC
-            12.8,      # Voltage
-            -10.5,     # Current (discharging)
-            -134.4,    # Power
-            0.0,       # Aux
-            360,       # Time remaining (min)
-            5000,      # Uptime
-            15.4,      # Consumed Ah
-        ) + (b"\x00" * 12)
-
-        data = parse_state_of_charge(payload)
-        self.assertIsNotNone(data)
-        self.assertEqual(data.soc, 85)
-        self.assertAlmostEqual(data.voltage, 12.8, places=1)
-        self.assertAlmostEqual(data.current, -10.5, places=1)
-        self.assertAlmostEqual(data.power, -134.4, places=1)
-        self.assertEqual(data.time_remaining_minutes, 360)
-        self.assertAlmostEqual(data.consumed_ah, 15.4, places=1)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_signed_values_preserved_without_claiming_discharge_mapping(self):
+        data=parse(struct.pack('<Ifff',50,12,-1,-12)+bytes(28))
+        self.assertEqual(data.current,-1)
+        self.assertEqual(data.power,-12)
