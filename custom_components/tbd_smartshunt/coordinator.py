@@ -55,7 +55,24 @@ class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
                 max_attempts=3,
             )
             try:
-                raw_bytes = await client.read_gatt_char(CHAR_STATE_OF_CHARGE)
+                try:
+                    raw_bytes = await client.read_gatt_char(CHAR_STATE_OF_CHARGE)
+                except Exception as read_err:
+                    err_msg = str(read_err).lower()
+                    if "insufficient authentication" in err_msg or "error: 5" in err_msg or "error 5" in err_msg:
+                        _LOGGER.warning(
+                            "TBD Smartshunt at %s requires BLE bonding/pairing. Attempting automatic pairing...",
+                            self.address,
+                        )
+                        if hasattr(client, "pair"):
+                            await client.pair()
+                            _LOGGER.info("Pairing succeeded with %s. Reading telemetry...", self.address)
+                            raw_bytes = await client.read_gatt_char(CHAR_STATE_OF_CHARGE)
+                        else:
+                            raise
+                    else:
+                        raise
+
                 data = parse_state_of_charge(raw_bytes)
                 if not data:
                     raise UpdateFailed(
