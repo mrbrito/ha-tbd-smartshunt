@@ -69,7 +69,13 @@ class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
                             _LOGGER.info("Pairing succeeded with %s. Reading telemetry...", self.address)
                             raw_bytes = await client.read_gatt_char(CHAR_STATE_OF_CHARGE)
                         else:
-                            raise
+                            raise BleakError("Client has no pair method")
+                    except Exception as pair_err:
+                        _LOGGER.error("Pairing attempt failed for %s: %s", self.address, pair_err)
+                        raise UpdateFailed(
+                            f"Pairing required for {self.address} but automatic pairing failed ({pair_err}). "
+                            f"Please run 'bluetoothctl pair {self.address}' and 'trust {self.address}' in your Home Assistant terminal."
+                        ) from pair_err
                     else:
                         raise
 
