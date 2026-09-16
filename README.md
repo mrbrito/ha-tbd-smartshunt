@@ -43,17 +43,22 @@ cooldown; restarting HA clears it. A bonded link can reconnect without user inpu
 when the adapter and device retain their bond. Polling releases the connection
 slot after each read (default 15 seconds; configurable during manual setup).
 
-ESPHome proxies must support active GATT connections and pairing. The backend
-checks the firmware's PAIRING capability. Pairing is between the shunt and the
-actual adapter/proxy: pairing your phone or running `bluetoothctl` against a
-host adapter does not bond an ESPHome proxy. Another proxy may need its own
-bond. The shunt's bond capacity and behavior across multiple proxies are untested.
+### ESPHome Bluetooth Proxies and Bonding
 
-If a passkey or confirmation is required, fully unattended pairing may fail.
-This release does not implement a passkey agent and never guesses or writes the
-custom PIN characteristic. It does not unpair devices or erase stored bonds.
-Close phone connections, check range and firmware, then check HA logs for the
-specific pairing/read failure. An unsupported adapter gets a distinct setup error.
+The TBD Smartshunt's telemetry characteristic (`2d86686a-53dc-25b3-0c4a-f0e10c8dee20`) supports both direct GATT Read and GATT Notifications (via CCCD `0x2902`). 
+
+- **Unbonded Proxies (Default)**: Reading the characteristic directly on unbonded connections triggers ATT Error 5 (`Insufficient authentication`). In v1.0.5, the integration subscribes to telemetry notifications, allowing unbonded ESPHome proxies to stream the 44-byte telemetry packet without requiring BLE pairing.
+- **ESPHome Proxy YAML Configuration**: If your peripheral strictly requires link encryption for all operations, ensure your ESP32 Bluetooth Proxy has active connections and bonding enabled in its YAML:
+  ```yaml
+  bluetooth_proxy:
+    active: true
+
+  esp32_ble:
+    io_capability: none
+    auth_req_mode: sc_bond
+  ```
+- **Multiple Proxies**: In environments with several ESPHome proxies, Home Assistant routes through the proxy with the strongest advertisement signal. Notification streaming ensures any proxy can receive telemetry without needing a shared bond across nodes.
+- **Host Bluetooth Adapters**: Local USB Bluetooth adapters running BlueZ natively support automatic "Just Works" pairing and link encryption out of the box.
 
 Discovery matches TBD device names; a generic SDK service UUID alone is not
 sufficient. Manual entry remains available for renamed devices. The expected

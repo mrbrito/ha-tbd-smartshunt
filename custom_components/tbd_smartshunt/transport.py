@@ -7,10 +7,12 @@ import re
 import time
 
 from .const import CHAR_STATE_OF_CHARGE
+from .parser import parse_state_of_charge
 
 _LOGGER = logging.getLogger(__name__)
 PAIR_TIMEOUT = 30
 READ_TIMEOUT = 20
+NOTIFY_TIMEOUT = 6
 PAIR_COOLDOWN = 10
 ENCRYPTION_DELAY = 1.5
 READ_RETRIES = 3
@@ -53,30 +55,97 @@ class PairingReader:
 
     def __init__(self) -> None:
         self._next_pair: dict[str, float] = {}
+        self._prefer_notify: set[str] = set()
 
     def reset_cooldown(self, peer: str | None = None) -> None:
         """Reset cooldown for testing or reload."""
         if peer:
             self._next_pair.pop(peer, None)
+            self._prefer_notify.discard(peer)
         else:
             self._next_pair.clear()
+            self._prefer_notify.clear()
+
+    async def _read_via_notify(self, client, peer: str, timeout: float = NOTIFY_TIMEOUT) -> bytes | None:
+        """Attempt to receive telemetry via GATT notification (CCCD 0x2902)."""
+        if not hasattr(client, "start_notify"):
+            return None
+
+        received = bytearray()
+        event = asyncio.Event()
+        valid_payload: list[bytes] = []
+
+        def _notification_handler(_char, data: bytes | bytearray) -> None:
+            received.extend(data)
+            if len(received) >= 44:
+                for i in range(len(received) - 43):
+                    candidate = bytes(received[i:i + 44])
+                    if parse_state_of_charge(candidate) is not None:
+                        valid_payload.append(candidate)
+                        event.set()
+                        return
+                if len(received) >= 88:
+                    event.set()
+
+        try:
+            _LOGGER.warning("[%s] Subscribing to telemetry notifications on %s...", peer, CHAR_STATE_OF_CHARGE)
+            await client.start_notify(CHAR_STATE_OF_CHARGE, _notification_handler)
+            try:
+                async with asyncio.timeout(timeout):
+                    await event.wait()
+            finally:
+                if hasattr(client, "stop_notify"):
+                    try:
+                        await client.stop_notify(CHAR_STATE_OF_CHARGE)
+                    except Exception as stop_err:
+                        _LOGGER.debug("[%s] Cleanup stop_notify: %s", peer, stop_err)
+
+            if valid_payload:
+                _LOGGER.warning(
+                    "[%s] Successfully received valid telemetry via notification (%d bytes)!",
+                    peer, len(valid_payload[0])
+                )
+                return valid_payload[0]
+            if len(received) >= 44:
+                _LOGGER.warning("[%s] Received %d notification bytes (raw fallback)", peer, len(received))
+                return bytes(received[:44])
+            _LOGGER.warning("[%s] Notification subscription finished without receiving 44 bytes (got %d bytes)", peer, len(received))
+        except Exception as err:
+            _LOGGER.warning("[%s] Notification subscription failed: %s", peer, err)
+        return None
 
     async def read(self, client, peer: str) -> bytes:
+        # If notifications previously succeeded on this peer, prefer notifications
+        if peer in self._prefer_notify:
+            notify_data = await self._read_via_notify(client, peer)
+            if notify_data:
+                return notify_data
+            self._prefer_notify.discard(peer)
+
         # First attempt: read directly (succeeds if link is already encrypted/bonded)
         try:
             async with asyncio.timeout(READ_TIMEOUT):
-                return bytes(await client.read_gatt_char(CHAR_STATE_OF_CHARGE))
+                payload = bytes(await client.read_gatt_char(CHAR_STATE_OF_CHARGE))
+                self._prefer_notify.discard(peer)
+                return payload
         except Exception as err:
             if not authentication_required(err):
                 raise
-            _LOGGER.warning("[%s] Telemetry read requires authentication (%s). Starting pairing sequence...", peer, err)
+            _LOGGER.warning("[%s] Telemetry read requires authentication (%s). Trying notification stream...", peer, err)
 
-        # Check cooldown to prevent hammering on repeated hard failures
+        # Second attempt: try notification stream before attempting pairing
+        notify_data = await self._read_via_notify(client, peer)
+        if notify_data:
+            self._prefer_notify.add(peer)
+            return notify_data
+
+        # Third attempt: Check cooldown to prevent hammering on repeated hard failures
         remaining = int(self._next_pair.get(peer, 0) - time.monotonic())
         if remaining > 0:
             raise PairingFailed(
                 f"Authentication still required; automatic pairing is cooling down ({remaining}s remaining). "
-                f"Pairing must use the connecting adapter; phone or host pairing does not bond a proxy."
+                f"If using an ESPHome proxy, configure 'esp32_ble: auth_req_mode: sc_bond' in ESPHome YAML, "
+                f"or use a host Bluetooth adapter with pairing support."
             )
         self._next_pair[peer] = time.monotonic() + PAIR_COOLDOWN
 
@@ -124,6 +193,14 @@ class PairingReader:
                     continue
                 break
 
+        # Also try notification stream one last time after pairing
+        _LOGGER.warning("[%s] Direct read failed after pairing; attempting notification stream as final fallback...", peer)
+        notify_data = await self._read_via_notify(client, peer)
+        if notify_data:
+            self._prefer_notify.add(peer)
+            self._next_pair.pop(peer, None)
+            return notify_data
+
         # If read still failed with Insufficient Authentication after pairing, the bond in BlueZ may be stale.
         # Purge the stale bond so the next attempt starts fresh.
         if authentication_required(last_err):
@@ -137,5 +214,7 @@ class PairingReader:
 
         raise PairingFailed(
             f"Pairing completed but telemetry read failed: {last_err}. "
-            f"Pairing must use the connecting adapter; phone or host pairing does not bond a proxy."
+            f"If connecting via an ESPHome Bluetooth proxy, the proxy may lack bonding support. "
+            f"Add 'esp32_ble: auth_req_mode: sc_bond' and 'io_capability: none' to ESPHome YAML, "
+            f"or use a host Bluetooth adapter."
         ) from last_err

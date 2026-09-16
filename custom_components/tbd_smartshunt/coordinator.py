@@ -36,9 +36,11 @@ class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
         device = bluetooth.async_ble_device_from_address(self.hass, self.address, connectable=True)
         if device is None:
             raise UpdateFailed(f"{self.address} is not visible to a connectable Bluetooth adapter/proxy")
+        details = getattr(device, "details", None)
+        source = details.get("source") if isinstance(details, dict) else "local/unknown"
         client = None
         try:
-            _LOGGER.warning("[%s] Connecting to TBD Smartshunt...", self.address)
+            _LOGGER.warning("[%s] Connecting to TBD Smartshunt via adapter/proxy: %s...", self.address, source)
             try:
                 async with asyncio.timeout(45):
                     client = await establish_connection(
@@ -50,13 +52,18 @@ class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
                     client = await establish_connection(
                         BleakClientWithServiceCache, device, self.device_name, max_attempts=2,
                     )
+            backend_name = type(getattr(client, "_backend", client)).__name__
+            _LOGGER.warning("[%s] Connected to TBD Smartshunt via %s (backend: %s)", self.address, source, backend_name)
             service = client.services.get_service(SERVICE_UUID)
             if service is None or not any(c.uuid.lower() == CHAR_STATE_OF_CHARGE for c in service.characteristics):
                 raise UpdateFailed("Device does not expose the expected TBD telemetry characteristic")
             raw = await self._reader.read(client, self.address)
             data = parse_state_of_charge(raw)
             if data is None:
-                raise UpdateFailed(f"Invalid telemetry from {self.address}: expected valid 44-byte packet, received {len(raw)} bytes")
+                raise UpdateFailed(
+                    f"Invalid telemetry from {self.address}: expected valid 44-byte packet, "
+                    f"received {len(raw)} bytes (hex: {raw.hex()})"
+                )
             _LOGGER.warning(
                 "[%s] Telemetry read successful! SoC=%d%%, Voltage=%.2fV, Current=%.2fA, Power=%.2fW",
                 self.address, data.soc, data.voltage, data.current, data.power,
@@ -70,7 +77,8 @@ class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
                 raise UpdateFailed(
                     f"{self.address}: Bluetooth proxy does not support BLE pairing. "
                     f"The TBD Smartshunt requires an encrypted link. "
-                    f"Please use a local Bluetooth adapter or an ESPHome proxy with pairing enabled (ESPHome 2024.6+)."
+                    f"Please use a local Bluetooth adapter or configure ESPHome with "
+                    f"'esp32_ble: auth_req_mode: sc_bond' and 'io_capability: none'."
                 ) from err
             raise UpdateFailed(f"Bluetooth communication failed for {self.address}: {err}") from err
         finally:

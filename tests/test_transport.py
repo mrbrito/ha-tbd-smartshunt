@@ -119,3 +119,65 @@ class PairingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(transport.authentication_required(outer))
         self.assertFalse(transport.authentication_required(None))
 
+    async def test_read_via_notify_success(self):
+        valid_packet = bytes.fromhex('64000000c8755141552bba40cf1d964200000000ffffffff9f2a0000ab40a43c000000000000000000000000')
+        c = self.client([Exception('Insufficient authentication')])
+        c.start_notify = AsyncMock(side_effect=lambda char, cb: cb(char, valid_packet))
+        c.stop_notify = AsyncMock()
+        reader = transport.PairingReader()
+        result = await reader.read(c, 'a')
+        self.assertEqual(result, valid_packet)
+        c.pair.assert_not_awaited()
+        c.stop_notify.assert_awaited_once()
+        self.assertIn('a', reader._prefer_notify)
+
+    async def test_read_via_notify_chunked(self):
+        valid_packet = bytes.fromhex('64000000c8755141552bba40cf1d964200000000ffffffff9f2a0000ab40a43c000000000000000000000000')
+        c = self.client([Exception('Insufficient authentication')])
+        def send_chunks(char, cb):
+            cb(char, valid_packet[:20])
+            cb(char, valid_packet[20:40])
+            cb(char, valid_packet[40:])
+        c.start_notify = AsyncMock(side_effect=send_chunks)
+        c.stop_notify = AsyncMock()
+        reader = transport.PairingReader()
+        result = await reader.read(c, 'a')
+        self.assertEqual(result, valid_packet)
+        c.pair.assert_not_awaited()
+        c.stop_notify.assert_awaited_once()
+
+    async def test_prefer_notify_on_subsequent_reads(self):
+        valid_packet = bytes.fromhex('64000000c8755141552bba40cf1d964200000000ffffffff9f2a0000ab40a43c000000000000000000000000')
+        c = self.client([Exception('Insufficient authentication')])
+        c.start_notify = AsyncMock(side_effect=lambda char, cb: cb(char, valid_packet))
+        c.stop_notify = AsyncMock()
+        reader = transport.PairingReader()
+        # First read discovers auth failure and succeeds via notify
+        await reader.read(c, 'a')
+        self.assertIn('a', reader._prefer_notify)
+
+        # Second read uses notify directly without calling read_gatt_char
+        c.read_gatt_char.reset_mock()
+        result = await reader.read(c, 'a')
+        self.assertEqual(result, valid_packet)
+        c.read_gatt_char.assert_not_awaited()
+
+    async def test_prefer_notify_fallback_on_failure(self):
+        valid_packet = bytes.fromhex('64000000c8755141552bba40cf1d964200000000ffffffff9f2a0000ab40a43c000000000000000000000000')
+        reader = transport.PairingReader()
+        reader._prefer_notify.add('a')
+        c = self.client([valid_packet])
+        c.start_notify = AsyncMock(side_effect=Exception('Notify broken'))
+        result = await reader.read(c, 'a')
+        self.assertEqual(result, valid_packet)
+        self.assertNotIn('a', reader._prefer_notify)
+
+    async def test_notify_failure_falls_back_to_pair(self):
+        valid_packet = bytes.fromhex('64000000c8755141552bba40cf1d964200000000ffffffff9f2a0000ab40a43c000000000000000000000000')
+        c = self.client([Exception('Insufficient authentication'), valid_packet], pair_result=True)
+        c.start_notify = AsyncMock(side_effect=Exception('CCCD write error'))
+        reader = transport.PairingReader()
+        result = await reader.read(c, 'a')
+        self.assertEqual(result, valid_packet)
+        c.pair.assert_awaited_once()
+

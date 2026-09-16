@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.5
+
+- Add GATT notification stream support (`client.start_notify`) on Characteristic `2d86686a-53dc-25b3-0c4a-f0e10c8dee20` via CCCD `0x2902`, enabling telemetry readouts across unbonded ESPHome Bluetooth Proxies.
+- Add adaptive transport: automatically caches notification preference on peers where direct reads report insufficient authentication, skipping redundant auth-fail cycles on subsequent polls.
+- Add MTU chunk reassembly (handles 20+20+4 byte fragments) with sliding-window packet validation.
+- Log connecting adapter/proxy source (`device.details["source"]`) and Bleak backend (`BleakClientESPHome` vs. `BleakClientBlueZDBus`) at WARNING level for instant visibility in Home Assistant logs.
+- Include full raw packet hex dump in error logs if a telemetry payload fails packet parsing.
+- Provide explicit ESPHome proxy bonding configuration guidance (`esp32_ble: auth_req_mode: sc_bond`) in error messages and documentation.
+
 ## 1.0.4
 
 - Pass `pair=True` in `establish_connection` to initiate link encryption on connect.
