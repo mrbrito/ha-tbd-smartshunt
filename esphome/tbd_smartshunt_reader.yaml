@@ -1,0 +1,326 @@
+# TBD Smartshunt — ESPHome Native BLE Client
+#
+# This config turns an ESP32 into a dedicated BLE client that connects
+# directly to one or two TBD Smartshunt / DaYan DA1 battery monitors.
+#
+# The ESP32's native BLE stack (ESP-IDF Bluedroid) handles real SMP
+# "Just Works" pairing and link encryption — something ESPHome Bluetooth
+# Proxies cannot do for the Dialog DA14531 chip on these shunts.
+#
+# HOW TO USE:
+# 1. Replace the mac_address values below with your shunt MAC(s)
+# 2. Adjust the wifi/api/ota sections for your network
+# 3. Flash to an ESP32 via ESPHome Dashboard or CLI
+# 4. The sensors will appear in Home Assistant automatically
+#
+# If you only have ONE shunt, delete or comment out the "shunt_2" sections.
+
+substitutions:
+  device_name: "tbd-smartshunt-reader"
+  friendly_name: "TBD Smartshunt Reader"
+  # Replace with your shunt MAC addresses:
+  shunt_1_mac: "FB:FB:FB:FF:0D:74"
+  shunt_2_mac: "FB:FB:FF:02:AF"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    # ESP-IDF framework is required for reliable BLE bonding/pairing
+    # The Arduino framework has limited SMP support
+
+logger:
+  level: DEBUG
+
+api:
+  # Home Assistant connects here to read sensor values
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${device_name} Fallback"
+    password: !secret fallback_password
+
+# BLE tracker is required for ble_client to work
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+    interval: 320ms
+    window: 110ms
+
+# NOTE: We deliberately do NOT include bluetooth_proxy here.
+# This ESP32 is a dedicated BLE client, not a proxy.
+
+# ─── BLE Client connections ───────────────────────────────────────────
+ble_client:
+  - mac_address: ${shunt_1_mac}
+    id: shunt_1
+    auto_connect: true
+    on_connect:
+      then:
+        - logger.log:
+            format: "Shunt 1 (%s) connected — SMP pairing will occur automatically if required"
+            args: ["\"${shunt_1_mac}\""]
+    on_disconnect:
+      then:
+        - logger.log:
+            format: "Shunt 1 (%s) disconnected — will auto-reconnect"
+            args: ["\"${shunt_1_mac}\""]
+
+  - mac_address: ${shunt_2_mac}
+    id: shunt_2
+    auto_connect: true
+    on_connect:
+      then:
+        - logger.log:
+            format: "Shunt 2 (%s) connected — SMP pairing will occur automatically if required"
+            args: ["\"${shunt_2_mac}\""]
+    on_disconnect:
+      then:
+        - logger.log:
+            format: "Shunt 2 (%s) disconnected — will auto-reconnect"
+            args: ["\"${shunt_2_mac}\""]
+
+# ─── Global variables to hold parsed values ───────────────────────────
+globals:
+  # Shunt 1
+  - id: shunt_1_soc_val
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: shunt_1_voltage_val
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: shunt_1_current_val
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: shunt_1_power_val
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  # Shunt 2
+  - id: shunt_2_soc_val
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: shunt_2_voltage_val
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: shunt_2_current_val
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: shunt_2_power_val
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+
+# ─── Sensors ──────────────────────────────────────────────────────────
+sensor:
+  # ── Shunt 1: BLE notification listener ──────────────────────────────
+  # This sensor subscribes to GATT notifications on the telemetry
+  # characteristic. When the shunt demands encryption, the ESP32's
+  # BLE stack automatically initiates "Just Works" SMP pairing.
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: shunt_1
+    id: shunt_1_raw
+    name: "Shunt 1 SOC"
+    service_uuid: "18424398-7cbc-11e9-8f9e-2a86e4085a59"
+    characteristic_uuid: "2d86686a-53dc-25b3-0c4a-f0e10c8dee20"
+    notify: true
+    icon: "mdi:battery"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    device_class: battery
+    state_class: measurement
+    lambda: |-
+      // Parse 44-byte TBD Smartshunt telemetry packet
+      // Format: <Ifff at offset 0 (little-endian)
+      //   [0:4]   uint32  SOC (0-100)
+      //   [4:8]   float32 voltage (V)
+      //   [8:12]  float32 current (A)
+      //   [12:16] float32 power (W)
+      //   [16:44] unknown/reserved
+      if (x.size() < 16) {
+        ESP_LOGW("tbd_shunt", "Shunt 1: packet too short (%d bytes)", x.size());
+        return NAN;
+      }
+      uint32_t soc;
+      float voltage, current, power;
+      memcpy(&soc, &x[0], 4);
+      memcpy(&voltage, &x[4], 4);
+      memcpy(&current, &x[8], 4);
+      memcpy(&power, &x[12], 4);
+
+      // Validate
+      if (soc > 100 || !std::isfinite(voltage) || !std::isfinite(current) || !std::isfinite(power) || voltage < 0) {
+        ESP_LOGW("tbd_shunt", "Shunt 1: invalid data — SOC=%u V=%.2f A=%.2f W=%.2f", soc, voltage, current, power);
+        return NAN;
+      }
+
+      ESP_LOGI("tbd_shunt", "Shunt 1: SOC=%u%% V=%.2f A=%.2f W=%.2f", soc, voltage, current, power);
+
+      // Store values for the template sensors to pick up
+      id(shunt_1_voltage_val) = voltage;
+      id(shunt_1_current_val) = current;
+      id(shunt_1_power_val) = power;
+
+      // Trigger the template sensors to update
+      id(shunt_1_voltage_sensor).update();
+      id(shunt_1_current_sensor).update();
+      id(shunt_1_power_sensor).update();
+
+      return (float)soc;
+
+  - platform: template
+    id: shunt_1_voltage_sensor
+    name: "Shunt 1 Voltage"
+    icon: "mdi:flash"
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    device_class: voltage
+    state_class: measurement
+    lambda: |-
+      return id(shunt_1_voltage_val);
+
+  - platform: template
+    id: shunt_1_current_sensor
+    name: "Shunt 1 Current"
+    icon: "mdi:current-dc"
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    device_class: current
+    state_class: measurement
+    lambda: |-
+      return id(shunt_1_current_val);
+
+  - platform: template
+    id: shunt_1_power_sensor
+    name: "Shunt 1 Power"
+    icon: "mdi:flash-outline"
+    unit_of_measurement: "W"
+    accuracy_decimals: 1
+    device_class: power
+    state_class: measurement
+    lambda: |-
+      return id(shunt_1_power_val);
+
+  # ── Shunt 2: BLE notification listener ──────────────────────────────
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: shunt_2
+    id: shunt_2_raw
+    name: "Shunt 2 SOC"
+    service_uuid: "18424398-7cbc-11e9-8f9e-2a86e4085a59"
+    characteristic_uuid: "2d86686a-53dc-25b3-0c4a-f0e10c8dee20"
+    notify: true
+    icon: "mdi:battery"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    device_class: battery
+    state_class: measurement
+    lambda: |-
+      if (x.size() < 16) {
+        ESP_LOGW("tbd_shunt", "Shunt 2: packet too short (%d bytes)", x.size());
+        return NAN;
+      }
+      uint32_t soc;
+      float voltage, current, power;
+      memcpy(&soc, &x[0], 4);
+      memcpy(&voltage, &x[4], 4);
+      memcpy(&current, &x[8], 4);
+      memcpy(&power, &x[12], 4);
+
+      if (soc > 100 || !std::isfinite(voltage) || !std::isfinite(current) || !std::isfinite(power) || voltage < 0) {
+        ESP_LOGW("tbd_shunt", "Shunt 2: invalid data — SOC=%u V=%.2f A=%.2f W=%.2f", soc, voltage, current, power);
+        return NAN;
+      }
+
+      ESP_LOGI("tbd_shunt", "Shunt 2: SOC=%u%% V=%.2f A=%.2f W=%.2f", soc, voltage, current, power);
+
+      id(shunt_2_voltage_val) = voltage;
+      id(shunt_2_current_val) = current;
+      id(shunt_2_power_val) = power;
+
+      id(shunt_2_voltage_sensor).update();
+      id(shunt_2_current_sensor).update();
+      id(shunt_2_power_sensor).update();
+
+      return (float)soc;
+
+  - platform: template
+    id: shunt_2_voltage_sensor
+    name: "Shunt 2 Voltage"
+    icon: "mdi:flash"
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    device_class: voltage
+    state_class: measurement
+    lambda: |-
+      return id(shunt_2_voltage_val);
+
+  - platform: template
+    id: shunt_2_current_sensor
+    name: "Shunt 2 Current"
+    icon: "mdi:current-dc"
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    device_class: current
+    state_class: measurement
+    lambda: |-
+      return id(shunt_2_current_val);
+
+  - platform: template
+    id: shunt_2_power_sensor
+    name: "Shunt 2 Power"
+    icon: "mdi:flash-outline"
+    unit_of_measurement: "W"
+    accuracy_decimals: 1
+    device_class: power
+    state_class: measurement
+    lambda: |-
+      return id(shunt_2_power_val);
+
+  # ── Diagnostics ─────────────────────────────────────────────────────
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+
+# Connection status binary sensors
+binary_sensor:
+  - platform: ble_client
+    ble_client_id: shunt_1
+    id: shunt_1_connected
+    name: "Shunt 1 Connected"
+
+  - platform: ble_client
+    ble_client_id: shunt_2
+    id: shunt_2_connected
+    name: "Shunt 2 Connected"
+
+  - platform: status
+    name: "Status"
+
+# Restart button for convenience
+button:
+  - platform: restart
+    name: "Restart"

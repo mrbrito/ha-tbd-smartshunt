@@ -33,14 +33,38 @@ class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
 
     async def async_read_data(self) -> ShuntData:
         """Also used by config flow to validate before creating an entry."""
-        device = bluetooth.async_ble_device_from_address(self.hass, self.address, connectable=True)
-        if device is None:
+        # Architecture Audit: We must use the Home Assistant host Bluetooth framework
+        # to initiate start_pairing via Bleak such that cryptographic keys save to the host's
+        # BlueZ stack database. This prevents proxy-roaming auth failures.
+        # Thus, we must prioritize local host adapters over ESPHome proxies.
+        all_devices = bluetooth.async_scanner_devices_by_address(self.hass, self.address, connectable=True)
+        if not all_devices:
             raise UpdateFailed(f"{self.address} is not visible to a connectable Bluetooth adapter/proxy")
+        
+        # Prioritize local BlueZ adapters to ensure server-side bonding works
+        device = None
+        for d in all_devices:
+            details = getattr(d, "details", None)
+            if isinstance(details, dict):
+                source = details.get("source", "")
+                if "hci" in source.lower() or "path" in details:
+                    device = d
+                    _LOGGER.info("[%s] Selected local BlueZ host adapter '%s' to implement server-side bonding", self.address, source)
+                    break
+        
+        # Fallback to the best available if no local adapter is found
+        if device is None:
+            device = all_devices[0]
+            _LOGGER.warning("[%s] No local BlueZ host adapter found. Falling back to default proxy. "
+                            "Server-side bonding to the BlueZ database may not be possible.", self.address)
+
         details = getattr(device, "details", None)
         source = details.get("source") if isinstance(details, dict) else "local/unknown"
+        is_proxy = isinstance(details, dict) and "source" in details and "hci" not in source.lower() and "path" not in details
         client = None
         try:
-            _LOGGER.warning("[%s] Connecting to TBD Smartshunt via adapter/proxy: %s...", self.address, source)
+            _LOGGER.warning("[%s] Connecting to TBD Smartshunt via %s: %s...",
+                            self.address, "ESPHome proxy" if is_proxy else "local adapter", source)
             try:
                 async with asyncio.timeout(45):
                     client = await establish_connection(
@@ -69,16 +93,26 @@ class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
                 self.address, data.soc, data.voltage, data.current, data.power,
             )
             return data
-        except (PairingFailed, UpdateFailed):
+        except (PairingFailed, UpdateFailed) as err:
+            if is_proxy:
+                _LOGGER.error(
+                    "[%s] Authentication failed via ESPHome proxy '%s'. "
+                    "ESPHome Bluetooth Proxies cannot perform real SMP pairing with the "
+                    "Dialog DA14531 chip on TBD Smartshunts. "
+                    "RECOMMENDED: Use the ESPHome native ble_client config in the esphome/ "
+                    "directory to flash a dedicated ESP32 as a direct BLE client. "
+                    "ALTERNATIVE: Use a USB Bluetooth dongle on your HA host.",
+                    self.address, source,
+                )
             raise
         except (BleakError, TimeoutError) as err:
             err_msg = str(err)
-            if "Pairing is not available" in err_msg:
+            if "Pairing is not available" in err_msg or "insufficient authentication" in err_msg.lower():
                 raise UpdateFailed(
-                    f"{self.address}: Bluetooth proxy does not support BLE pairing. "
-                    f"The TBD Smartshunt requires an encrypted link. "
-                    f"Please use a local Bluetooth adapter or configure ESPHome with "
-                    f"'esp32_ble: auth_req_mode: sc_bond' and 'io_capability: none'."
+                    f"{self.address}: Bluetooth proxy cannot establish encrypted link. "
+                    f"The TBD Smartshunt requires SMP pairing that ESPHome proxies cannot perform. "
+                    f"Use the ESPHome native ble_client approach (see esphome/ directory) "
+                    f"or a local USB Bluetooth adapter on the HA host."
                 ) from err
             raise UpdateFailed(f"Bluetooth communication failed for {self.address}: {err}") from err
         finally:

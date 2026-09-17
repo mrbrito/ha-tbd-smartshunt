@@ -13,7 +13,7 @@ _LOGGER = logging.getLogger(__name__)
 PAIR_TIMEOUT = 30
 READ_TIMEOUT = 20
 NOTIFY_TIMEOUT = 6
-PAIR_COOLDOWN = 10
+PAIR_COOLDOWN = 30
 ENCRYPTION_DELAY = 1.5
 READ_RETRIES = 3
 
@@ -144,16 +144,22 @@ class PairingReader:
         if remaining > 0:
             raise PairingFailed(
                 f"Authentication still required; automatic pairing is cooling down ({remaining}s remaining). "
-                f"If using an ESPHome proxy, configure 'esp32_ble: auth_req_mode: sc_bond' in ESPHome YAML, "
-                f"or use a host Bluetooth adapter with pairing support."
+                f"ESPHome Bluetooth Proxies cannot perform real SMP pairing with this device. "
+                f"RECOMMENDED: Use the ESPHome native ble_client config (see esphome/ directory) "
+                f"or a local USB Bluetooth adapter on the HA host."
             )
         self._next_pair[peer] = time.monotonic() + PAIR_COOLDOWN
 
         # Attempt pairing
-        _LOGGER.warning("[%s] Initiating BLE pairing with device...", peer)
+        _LOGGER.warning("[%s] Initiating BLE pairing with device to establish server-side bonding...", peer)
         try:
             async with asyncio.timeout(PAIR_TIMEOUT):
-                result = await client.pair()
+                # Pass protection_level=1 (Just Works/Encryption) to BlueZ if backend supports it
+                try:
+                    result = await client.pair(protection_level=1)
+                except TypeError:
+                    # Fallback for backends (like bleak-esphome) that don't accept protection_level
+                    result = await client.pair()
             # Old Bleak returns bool, new Bleak returns None.
             if result is False:
                 raise PairingFailed("Adapter reported pairing failure")
@@ -214,7 +220,9 @@ class PairingReader:
 
         raise PairingFailed(
             f"Pairing completed but telemetry read failed: {last_err}. "
-            f"If connecting via an ESPHome Bluetooth proxy, the proxy may lack bonding support. "
-            f"Add 'esp32_ble: auth_req_mode: sc_bond' and 'io_capability: none' to ESPHome YAML, "
-            f"or use a host Bluetooth adapter."
+            f"ESPHome Bluetooth Proxies cannot perform real SMP key exchange with the "
+            f"Dialog DA14531 chip on TBD Smartshunts. "
+            f"RECOMMENDED: Use the ESPHome native ble_client config (see esphome/ directory) "
+            f"to flash a dedicated ESP32 as a direct BLE client. "
+            f"ALTERNATIVE: Use a USB Bluetooth dongle on your HA host."
         ) from last_err
