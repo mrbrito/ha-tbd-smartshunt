@@ -37,24 +37,26 @@ class TbdSmartshuntCoordinator(DataUpdateCoordinator[ShuntData]):
         # to initiate start_pairing via Bleak such that cryptographic keys save to the host's
         # BlueZ stack database. This prevents proxy-roaming auth failures.
         # Thus, we must prioritize local host adapters over ESPHome proxies.
-        all_devices = bluetooth.async_scanner_devices_by_address(self.hass, self.address, connectable=True)
-        if not all_devices:
+        all_scanner_devices = bluetooth.async_scanner_devices_by_address(self.hass, self.address, connectable=True)
+        if not all_scanner_devices:
             raise UpdateFailed(f"{self.address} is not visible to a connectable Bluetooth adapter/proxy")
         
         # Prioritize local BlueZ adapters to ensure server-side bonding works
         device = None
-        for d in all_devices:
-            details = getattr(d, "details", None)
+        for scanner_device in all_scanner_devices:
+            # async_scanner_devices_by_address returns BluetoothScannerDevice objects
+            ble_device = getattr(scanner_device, "ble_device", scanner_device)
+            details = getattr(ble_device, "details", None)
             if isinstance(details, dict):
                 source = details.get("source", "")
                 if "hci" in source.lower() or "path" in details:
-                    device = d
+                    device = ble_device
                     _LOGGER.info("[%s] Selected local BlueZ host adapter '%s' to implement server-side bonding", self.address, source)
                     break
         
         # Fallback to the best available if no local adapter is found
         if device is None:
-            device = all_devices[0]
+            device = getattr(all_scanner_devices[0], "ble_device", all_scanner_devices[0])
             _LOGGER.warning("[%s] No local BlueZ host adapter found. Falling back to default proxy. "
                             "Server-side bonding to the BlueZ database may not be possible.", self.address)
 
